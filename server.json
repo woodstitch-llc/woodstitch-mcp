@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.woodstitch/tts-human-eval",
+  "title": "Woodstitch",
+  "description": "Paid human listeners judge TTS audio blind: pairwise preference or human-vs-AI detection.",
+  "websiteUrl": "https://woodstitch.com/docs",
+  "version": "0.1.5",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "woodstitch-mcp",
+      "version": "0.1.5",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "WOODSTITCH_API_KEY",
+          "description": "Woodstitch API key (ws_live_...), from https://woodstitch.com/app/api-keys. Not needed for the templates and pricing tools.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/woodstitch-llc/woodstitch-mcp",
+    "source": "github"
+  }
+}
