@@ -333,6 +333,8 @@ def woodstitch_export(eval_id: int, format: str = "json", save_to: Optional[str]
         if r.status_code >= 400:
             _unwrap(r)
         text = r.text
+    if save_to and HOSTED:
+        raise WoodstitchError("save_to is not available on the hosted server; the export is returned in the response.")
     if save_to:
         p = Path(save_to).expanduser()
         p.write_text(text)
@@ -393,6 +395,17 @@ def main() -> None:
         HOSTED = True
         try:  # a hosted server cannot read the user's disk; audio arrives as URLs or via POST /v1/files
             mcp.remove_tool("woodstitch_upload_files")
+        except Exception:
+            pass
+        try:  # and must never write to its own disk on a caller's behalf: export without save_to
+            mcp.remove_tool("woodstitch_export")
+
+            @mcp.tool(name="woodstitch_export", annotations=_ann(read_only=True), description=(
+                "Every judgement as a row (pseudonymous rater, pair/clip id, source, speaker, passage, answer, "
+                "confidence, time spent). format 'json' returns the rows; 'csv' returns CSV text."))
+            def woodstitch_export_hosted(eval_id: int, format: str = "json") -> dict:
+                return woodstitch_export(eval_id, format, None)
+            _apply_titles()
         except Exception:
             pass
         host = os.environ.get("WOODSTITCH_MCP_HOST", "127.0.0.1")
