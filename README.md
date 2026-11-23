@@ -2,6 +2,8 @@
 
 <!-- mcp-name: com.woodstitch/tts-human-eval -->
 
+[![woodstitch-mcp MCP server](https://glama.ai/mcp/servers/woodstitch-llc/woodstitch-mcp/badges/score.svg)](https://glama.ai/mcp/servers/woodstitch-llc/woodstitch-mcp)
+
 An [MCP](https://modelcontextprotocol.io) server for the [Woodstitch API](https://woodstitch.com/docs):
 paid human listeners judge your text-to-speech audio in blinded studies, and your
 agent gets a number back with a confidence interval.
