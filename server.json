@@ -4,7 +4,7 @@
   "title": "Woodstitch",
   "description": "Paid human listeners judge TTS audio blind: pairwise preference or human-vs-AI detection.",
   "websiteUrl": "https://woodstitch.com/docs",
-  "version": "0.1.5",
+  "version": "0.2.4",
   "packages": [
     {
       "registryType": "pypi",
@@ -28,5 +28,11 @@
   "repository": {
     "url": "https://github.com/woodstitch-llc/woodstitch-mcp",
     "source": "github"
-  }
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.woodstitch.com/mcp"
+    }
+  ]
 }
