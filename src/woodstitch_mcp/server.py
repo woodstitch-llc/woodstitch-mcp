@@ -75,12 +75,36 @@ class WoodstitchError(_ToolError):  # type: ignore[misc]
     pass
 
 
+HOSTED = False  # set by main() when serving streamable HTTP (one shared process, many users)
+
+
+import contextvars
+_REQ_KEY: "contextvars.ContextVar[str]" = contextvars.ContextVar("woodstitch_req_key", default="")
+
+
+def _header_key() -> str:
+    """Hosted mode: the caller's key arrives per request (Authorization: Bearer ... or X-Woodstitch-Key);
+    the ASGI wrapper in main() puts it in a context variable for the duration of that request."""
+    return _REQ_KEY.get()
+
+
+def _key_from_scope(scope) -> str:
+    h = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+    auth = (h.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (h.get("x-woodstitch-key") or "").strip()
+
+
 def _key(required: bool = True) -> Optional[str]:
-    k = os.environ.get("WOODSTITCH_API_KEY", "").strip()
+    k = _header_key() if HOSTED else os.environ.get("WOODSTITCH_API_KEY", "").strip()
     if not k and required:
         raise WoodstitchError(
-            "WOODSTITCH_API_KEY is not set. Create a key at https://woodstitch.com/app/api-keys "
-            "and start the server with that variable in its environment."
+            ("No Woodstitch API key on this request. Send it as 'Authorization: Bearer ws_live_...'. "
+             "Create one at https://woodstitch.com/app/api-keys, or POST https://api.woodstitch.com/v1/start for a trial key.")
+            if HOSTED else
+            ("WOODSTITCH_API_KEY is not set. Create a key at https://woodstitch.com/app/api-keys "
+             "and start the server with that variable in its environment.")
         )
     return k or None
 
@@ -160,6 +184,12 @@ def woodstitch_list_evals() -> dict:
     "Use an id anywhere woodstitch_create_eval takes an audio reference. Re-uploading the same bytes "
     "is harmless (content-addressed)."))
 def woodstitch_upload_files(paths: list[str]) -> dict:
+    if HOSTED:
+        raise WoodstitchError(
+            "This is the hosted Woodstitch server, which cannot read files on your machine. Either pass public or "
+            "signed audio URLs directly to woodstitch_create_eval (clips are fetched once), or upload from your "
+            "shell: POST https://api.woodstitch.com/v1/files as multipart 'file[]' parts with your Bearer key, "
+            "then use the returned file ids.")
     if not paths:
         raise WoodstitchError("paths is empty")
     if len(paths) > 100:
@@ -324,6 +354,32 @@ def woodstitch_cancel_eval(eval_id: int, confirm: bool = False, idempotency_key:
 def main() -> None:
     if "--version" in sys.argv:
         print(f"woodstitch-mcp {__version__}")
+        return
+    if "--http" in sys.argv or os.environ.get("WOODSTITCH_MCP_TRANSPORT") == "http":
+        global HOSTED
+        HOSTED = True
+        host = os.environ.get("WOODSTITCH_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("WOODSTITCH_MCP_PORT", "8765"))
+        path = os.environ.get("WOODSTITCH_MCP_PATH", "/mcp")
+        import uvicorn
+        kw = dict(streamable_http_path=path, stateless_http=True, json_response=True, host=host)
+        try:
+            from mcp.server.transport_security import TransportSecuritySettings
+            kw["transport_security"] = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        except Exception:
+            pass
+        inner = mcp.streamable_http_app(**kw)
+
+        async def app(scope, receive, send):  # per-request key -> context var (copied into tool threads)
+            if scope.get("type") == "http":
+                tok = _REQ_KEY.set(_key_from_scope(scope))
+                try:
+                    return await inner(scope, receive, send)
+                finally:
+                    _REQ_KEY.reset(tok)
+            return await inner(scope, receive, send)
+
+        uvicorn.run(app, host=host, port=port, proxy_headers=True, forwarded_allow_ips="127.0.0.1", log_level="warning")
         return
     mcp.run(transport="stdio")
 
