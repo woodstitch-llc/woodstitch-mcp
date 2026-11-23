@@ -273,7 +273,7 @@ def woodstitch_create_eval(
     return out
 
 
-@mcp.tool(annotations=_ann(), description=(
+@mcp.tool(annotations=_ann(destructive=True), description=(
     "START an evaluation. THIS SPENDS REAL MONEY and cannot be undone once listeners begin. "
     "Only call it after the user has seen the quote total returned by woodstitch_create_eval and "
     "explicitly agreed. Pass that total as user_confirmed_amount_usd: it is sent to the API as the "
@@ -350,6 +350,39 @@ def woodstitch_cancel_eval(eval_id: int, confirm: bool = False, idempotency_key:
     return _post(f"/evals/{eval_id}/cancel", {}, idempotency_key)
 
 
+# ----------------------------------------------------------------------------- titles
+TITLES = {
+    "woodstitch_templates": "List test templates", "woodstitch_pricing": "Get pricing",
+    "woodstitch_account": "Show account balance", "woodstitch_list_evals": "List evaluations",
+    "woodstitch_upload_files": "Upload audio files", "woodstitch_list_files": "List uploaded files",
+    "woodstitch_delete_file": "Delete an uploaded file", "woodstitch_create_eval": "Create and quote an evaluation",
+    "woodstitch_start_eval": "Start an evaluation (spends money)", "woodstitch_get_eval": "Get evaluation status",
+    "woodstitch_get_results": "Get evaluation results", "woodstitch_export": "Export judgements",
+    "woodstitch_cancel_eval": "Cancel an evaluation",
+}
+
+
+def _apply_titles() -> None:
+    try:
+        tools = mcp._tool_manager.list_tools()
+    except Exception:
+        return
+    for t in tools:
+        title = TITLES.get(t.name)
+        if not title:
+            continue
+        try:
+            if t.annotations is not None:
+                t.annotations.title = title
+            if "title" in type(t).model_fields:
+                t.title = title
+        except Exception:
+            pass
+
+
+_apply_titles()
+
+
 # ----------------------------------------------------------------------------- entry
 def main() -> None:
     if "--version" in sys.argv:
@@ -358,6 +391,10 @@ def main() -> None:
     if "--http" in sys.argv or os.environ.get("WOODSTITCH_MCP_TRANSPORT") == "http":
         global HOSTED
         HOSTED = True
+        try:  # a hosted server cannot read the user's disk; audio arrives as URLs or via POST /v1/files
+            mcp.remove_tool("woodstitch_upload_files")
+        except Exception:
+            pass
         host = os.environ.get("WOODSTITCH_MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("WOODSTITCH_MCP_PORT", "8765"))
         path = os.environ.get("WOODSTITCH_MCP_PATH", "/mcp")

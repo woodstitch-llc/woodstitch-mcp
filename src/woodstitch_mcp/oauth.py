@@ -245,9 +245,10 @@ async def handle(scope, receive, send) -> bool:
                     await _send(send, 400, {"error": "invalid_grant", "error_description": "PKCE check failed"}); return True
                 key, cid = rec["key"], rec["client_id"]
             elif gt == "refresh_token":
-                toks = _load("refresh"); r = toks.get(_h(f.get("refresh_token", "")))
-                if not r:
+                toks = _load("refresh"); r = toks.pop(_h(f.get("refresh_token", "")), None)  # rotate: one use only
+                if not r or (f.get("client_id") and f.get("client_id") != r["client_id"]):
                     await _send(send, 400, {"error": "invalid_grant"}); return True
+                _save("refresh", toks)
                 key, cid = r["key"], r["client_id"]
             else:
                 await _send(send, 400, {"error": "unsupported_grant_type"}); return True
