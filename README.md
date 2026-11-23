@@ -10,7 +10,17 @@ Two tasks, and only two: **pairwise preference** (a listener hears two clips of 
 same text and picks one, forced choice) and **human-vs-AI detection** (one clip,
 human or AI, confidence 1–4). Not offered: MOS, CMOS, MUSHRA or any 1–5 scale.
 
-## Install
+## Hosted server (no install)
+
+Woodstitch runs this server at **`https://api.woodstitch.com/mcp`** (streamable HTTP, OAuth sign-in).
+
+- **Claude (web, desktop, Cowork):** Settings → Connectors → Add custom connector → paste the URL → sign in with your API key, or create a trial account ($25 credit).
+- **Claude Code:** `claude mcp add --transport http woodstitch https://api.woodstitch.com/mcp`
+- **Other clients:** any MCP client with remote HTTP support; send `Authorization: Bearer ws_live_...` if it doesn't do OAuth.
+
+The hosted server has no file-upload tool (it can't read your disk): pass audio as public URLs, or upload with `POST /v1/files` first.
+
+## Install (local)
 
 Get an API key at <https://woodstitch.com/app/api-keys>, then:
 
