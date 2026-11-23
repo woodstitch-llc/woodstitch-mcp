@@ -79,6 +79,7 @@ HOSTED = False  # set by main() when serving streamable HTTP (one shared process
 
 
 import contextvars
+PUBLIC_TOOLS = {"woodstitch_templates", "woodstitch_pricing"}   # callable before sign-in (hosted)
 _REQ_KEY: "contextvars.ContextVar[str]" = contextvars.ContextVar("woodstitch_req_key", default="")
 
 
@@ -427,12 +428,40 @@ def main() -> None:
             if await oauth.handle(scope, receive, send):      # discovery, registration, sign-in, token
                 return
             key = oauth.resolve_token(_key_from_scope(scope))  # wsm_ OAuth token or a raw ws_live_ key
+            sent_auth = any(k.decode().lower() in ("authorization", "x-woodstitch-key") for k, _ in scope.get("headers", []))
+            if not key and not sent_auth and scope.get("method") == "POST":
+                # Lazy sign-in (claude.com/docs/connectors/building/lazy-authentication): with no credentials at all,
+                # let the client connect, list tools and call the public ones; any other tool call gets the 401
+                # that makes Claude show its Connect card and retry after sign-in.
+                raw = b""
+                while True:
+                    m = await receive()
+                    raw += m.get("body", b"")
+                    if not m.get("more_body"):
+                        break
+                try:
+                    msgs = json.loads(raw or b"null")
+                except ValueError:
+                    msgs = None
+                msgs = msgs if isinstance(msgs, list) else [msgs]
+                needs = any(isinstance(x, dict) and x.get("method") == "tools/call"
+                            and (x.get("params") or {}).get("name") not in PUBLIC_TOOLS for x in msgs)
+                if not needs:
+                    done = False
+
+                    async def replay():
+                        nonlocal done
+                        if not done:
+                            done = True
+                            return {"type": "http.request", "body": raw, "more_body": False}
+                        return await receive()
+                    return await inner(scope, replay, send)
             if not key:
                 hdr = {k.decode().lower() for k, _ in scope.get("headers", [])}
                 body = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message":
                        "Sign in with Woodstitch (OAuth), or send 'Authorization: Bearer ws_live_...'."}}).encode()
                 hs = [(b"content-type", b"application/json")] + [(k.encode(), v.encode()) for k, v in
-                      oauth.unauthorized_headers("invalid_token" if "authorization" in hdr else "").items()]
+                      oauth.unauthorized_headers("invalid_token").items()]
                 await send({"type": "http.response.start", "status": 401, "headers": hs})
                 await send({"type": "http.response.body", "body": body})
                 return

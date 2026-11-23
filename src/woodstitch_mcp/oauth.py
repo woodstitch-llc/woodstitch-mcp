@@ -16,8 +16,11 @@ import httpx
 ISSUER = os.environ.get("WOODSTITCH_MCP_ISSUER", "https://api.woodstitch.com")
 API = os.environ.get("WOODSTITCH_BASE_URL", "https://api.woodstitch.com/v1")
 STATE = Path(os.environ.get("WOODSTITCH_MCP_STATE", "/home/ubuntu/woodstitch/mcp_remote/state"))
-ACCESS_TTL = 365 * 86400
+ACCESS_TTL = 3600            # 1 hour; clients refresh silently (rotating refresh tokens)
+REFRESH_TTL = 180 * 86400    # a refresh token unused for 180 days dies
 CODE_TTL = 600
+SITE = os.environ.get("WOODSTITCH_SITE", "https://woodstitch.com")
+PEPPER_FILE = os.environ.get("WOODSTITCH_PEPPER_FILE", "/home/ubuntu/woodstitch/pepper.php")
 _lock = threading.Lock()
 
 
@@ -39,6 +42,34 @@ def _save(name, obj):
 
 def _h(t):
     return hashlib.sha256(t.encode()).hexdigest()
+
+
+def _pepper() -> bytes:
+    import re
+    try:
+        m = re.search(r"return\s*'([^']+)'", Path(PEPPER_FILE).read_text())
+        return m.group(1).encode() if m else b""
+    except Exception:
+        return b""
+
+
+def _internal_ok(hdr: dict, payload: str) -> bool:
+    """Calls from woodstitch.com's PHP (app.php) to 127.0.0.1:8765 directly: never via the Apache proxy
+    (which adds X-Forwarded-For) and signed with the site pepper."""
+    import hmac
+    pep = _pepper()
+    if not pep or hdr.get("x-forwarded-for"):
+        return False
+    want = hmac.new(pep, b"mcpint\0" + payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(want, hdr.get("x-ws-sig", ""))
+
+
+def _redirect_host(uri: str) -> str:
+    try:
+        u = urllib.parse.urlparse(uri)
+        return u.hostname or uri
+    except Exception:
+        return uri
 
 
 def resolve_token(token: str) -> str:
@@ -106,31 +137,42 @@ def as_metadata():
 
 
 # ------------------------------------------------------------------ pages
+# The main sign-in lives on woodstitch.com (/app/connect): Google or an emailed link, the same as the
+# dashboard, then an Allow screen. This page is only the "use an API key instead" fallback.
 PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Connect Woodstitch</title><style>
-body{{margin:0;background:#F7F4F0;color:#17202B;font:16px/1.55 Manrope,Inter,system-ui,sans-serif}}
-main{{max-width:460px;margin:48px auto;padding:0 16px}} .card{{background:#fff;border:1px solid #E3DAD2;border-radius:14px;padding:24px;margin:0 0 16px}}
-h1{{font-size:24px;margin:0 0 6px}} p{{margin:0 0 14px;color:#5F6875}} label{{font-size:13px;font-weight:700;display:block;margin:0 0 6px}}
-input{{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border:1px solid #D5D9DF;border-radius:8px;margin:0 0 12px}}
-button{{font:inherit;font-weight:700;border:0;border-radius:8px;padding:11px 16px;width:100%;cursor:pointer;background:#7E22CE;color:#fff}}
-button.alt{{background:#17202B}} .err{{color:#B42318;font-weight:600}} small{{color:#8A919C}} a{{color:#7E22CE}}
+<title>Connect with an API key · Woodstitch</title><style>
+:root{{--bg:#F7F4F0;--card:#fff;--ink:#17202B;--mid:#5F6875;--line:#E3DAD2;--acc:#7E22CE}}
+@media(prefers-color-scheme:dark){{:root{{--bg:#141217;--card:#1C1A20;--ink:#F2EEF5;--mid:#A9A2B0;--line:#2A262F;--acc:#B57BF0}}}}
+body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 Manrope,Inter,system-ui,sans-serif}}
+main{{max-width:440px;margin:48px auto;padding:0 16px}} .card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;margin:0 0 14px}}
+h1{{font-size:22px;margin:0 0 6px}} p{{margin:0 0 14px;color:var(--mid)}} label{{font-size:13px;font-weight:700;display:block;margin:0 0 6px}}
+input{{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:0 0 12px;background:var(--card);color:var(--ink)}}
+button{{font:inherit;font-weight:700;border:0;border-radius:8px;padding:11px 16px;width:100%;cursor:pointer;background:var(--acc);color:#fff}}
+.err{{color:#B42318;font-weight:600}} small{{color:var(--mid)}} a{{color:var(--acc)}}
 </style></head><body><main>
-<h1>Connect Woodstitch to {client}</h1>
-<p>Paid US listeners judge your text-to-speech audio blind. Connecting lets {client} quote and run listening tests for you; nothing is charged without a quote you approve.</p>
+<h1>Connect with an API key</h1>
+<p>For accounts that use a key. Tokens go back to <strong>{host}</strong>.</p>
 {err}
-<form class=card method=post><input type=hidden name=req value="{req}">
-<label for=key>Use your API key</label><input id=key name=api_key placeholder="ws_live_..." autocomplete=off>
-<button name=action value=key>Connect</button>
-<p style="margin:10px 0 0"><small>Keys are at <a href="https://woodstitch.com/app/api-keys" target=_blank>woodstitch.com/app/api-keys</a>.</small></p></form>
-<form class=card method=post><input type=hidden name=req value="{req}">
-<label for=email>New to Woodstitch? Start with $25 of free credit</label><input id=email name=email type=email placeholder="you@company.com (optional)">
-<button class=alt name=action value=trial>Create a trial account and connect</button></form>
-<p><small>By connecting you agree to the <a href="https://woodstitch.com/legal/privacy" target=_blank>privacy policy</a>. Woodstitch LLC, Denver CO.</small></p>
+<form class=card method=post action="/oauth/key"><input type=hidden name=req value="{req}">
+<label for=key>API key</label><input id=key name=api_key placeholder="ws_live_..." autocomplete=off autofocus>
+<button>Connect</button>
+<p style="margin:10px 0 0"><small>Keys are at <a href="{site}/app/api-keys" target=_blank>woodstitch.com/app/api-keys</a>.</small></p></form>
+<p><small><a href="{site}/app/connect?r={req}">Sign in with Google or email instead</a></small></p>
 </main></body></html>"""
 
+MSG = """<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Woodstitch</title><style>body{{margin:0;background:#F7F4F0;color:#17202B;font:16px/1.55 system-ui,sans-serif}}
+@media(prefers-color-scheme:dark){{body{{background:#141217;color:#F2EEF5}}}}
+main{{max-width:440px;margin:64px auto;padding:0 16px}} h1{{font-size:21px}} p{{color:#8A919C}}</style></head>
+<body><main><h1>{title}</h1><p>{body}</p></main></body></html>"""
 
-def _page(req_id, client, err=""):
-    return PAGE.format(client=html.escape(client or "Claude"), req=html.escape(req_id),
+
+def _msg(title, body):
+    return MSG.format(title=html.escape(title), body=html.escape(body))
+
+
+def _page(req_id, host, err=""):
+    return PAGE.format(host=html.escape(host or "your app"), req=html.escape(req_id), site=SITE,
                        err=f'<p class=err>{html.escape(err)}</p>' if err else "")
 
 
@@ -138,24 +180,43 @@ def _redirect_ok(client, uri):
     return uri in client.get("redirect_uris", [])
 
 
-def _check_key(key: str) -> bool:
+def _check_key(key: str, lenient: bool = False) -> bool:
+    """True when the key works. lenient: only a definite 401/403 counts as dead (a network blip must not end a connection)."""
     try:
-        r = httpx.get(f"{API}/account", headers={"Authorization": f"Bearer {key}", "User-Agent": "woodstitch-mcp-oauth"}, timeout=20)
-        return r.status_code == 200
+        r = httpx.get(f"{API}/account", headers={"Authorization": f"Bearer {key}", "User-Agent": "woodstitch-mcp-oauth"}, timeout=8)
+        return r.status_code not in (401, 403) if lenient else r.status_code == 200
     except Exception:
-        return False
+        return lenient
 
 
-def _trial(email: str, client_name: str, ip: str):
-    body = {"source": f"claude-connector:{client_name}"[:120]}
-    if email:
-        body["email"] = email
-    try:
-        r = httpx.post(f"{API}/start", json=body, headers={"User-Agent": "woodstitch-mcp-oauth", "X-Woodstitch-Client-IP": ip}, timeout=30)
-        j = r.json()
-        return j.get("api_key"), (None if j.get("api_key") else (j.get("error", {}) or {}).get("message") or f"HTTP {r.status_code}")
-    except Exception as e:
-        return None, str(e)
+def _pending(rid):
+    with _lock:
+        p = _load("pending").get(rid or "")
+    return p if p and p["t"] > time.time() - 1800 else None
+
+
+def _finish(rid, key=None, deny=False):
+    """Consume the pending request; return the redirect URL back to the client (code, or access_denied)."""
+    with _lock:
+        p = _load("pending"); pend = p.pop(rid, None); _save("pending", p)
+        if not pend:
+            return None
+        q = pend["q"]
+        params = {}
+        if deny:
+            params["error"] = "access_denied"
+        else:
+            code = secrets.token_urlsafe(32)
+            c = _load("codes"); now = time.time()
+            c = {k: v for k, v in c.items() if v["exp"] > now}
+            c[_h(code)] = {"exp": now + CODE_TTL, "key": key, "client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
+                           "challenge": q["code_challenge"]}
+            _save("codes", c)
+            params["code"] = code
+        if q.get("state"):
+            params["state"] = q["state"]
+    sep = "&" if "?" in q["redirect_uri"] else "?"
+    return q["redirect_uri"] + sep + urllib.parse.urlencode(params)
 
 
 # ------------------------------------------------------------------ ASGI handler
@@ -170,7 +231,9 @@ async def handle(scope, receive, send) -> bool:
     if path.startswith("/.well-known/oauth-authorization-server") or path.startswith("/.well-known/openid-configuration"):
         await _send(send, 200, as_metadata()); return True
     hdr = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-    ip = (hdr.get("x-forwarded-for") or "").split(",")[0].strip() or (scope.get("client") or ["", 0])[0]
+    qs = scope.get("query_string", b"").decode()
+    HTML = "text/html; charset=utf-8"
+    SEC = {"x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'"}
 
     if path == "/oauth/register" and method == "POST":
         meta = _form(await _body(receive), hdr.get("content-type", "application/json"))
@@ -185,51 +248,58 @@ async def handle(scope, receive, send) -> bool:
             c = _load("clients"); c[cid] = rec; _save("clients", c)
         await _send(send, 201, rec); return True
 
-    if path == "/oauth/authorize":
+    if path == "/oauth/authorize" and method == "GET":
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
+        client = _load("clients").get(q.get("client_id", ""))
+        if not client or not _redirect_ok(client, q.get("redirect_uri", "")):
+            await _send(send, 400, _msg("Can't connect", "This connection request isn't recognised. Remove the Woodstitch connector in Claude and add it again."), HTML, SEC); return True
+        if q.get("response_type") != "code" or q.get("code_challenge_method") != "S256" or not q.get("code_challenge"):
+            await _send(send, 400, _msg("Can't connect", "This app asked in a way Woodstitch doesn't support (PKCE S256 required)."), HTML, SEC); return True
+        rid = secrets.token_urlsafe(18)
+        with _lock:
+            p = _load("pending"); now = time.time()
+            p = {k: v for k, v in p.items() if v["t"] > now - 1800}
+            p[rid] = {"t": now, "q": q}; _save("pending", p)
+        await _send(send, 302, b"", "text/plain", {"location": f"{SITE}/app/connect?r={rid}"}); return True
+
+    # fallback: paste an API key
+    if path == "/oauth/key":
         if method == "GET":
-            q = {k: v[0] for k, v in urllib.parse.parse_qs(scope.get("query_string", b"").decode()).items()}
-            client = _load("clients").get(q.get("client_id", ""))
-            if not client or not _redirect_ok(client, q.get("redirect_uri", "")):
-                await _send(send, 400, "Unknown client or redirect URI. Remove and re-add the Woodstitch connector.", "text/plain"); return True
-            if q.get("response_type") != "code" or q.get("code_challenge_method") != "S256" or not q.get("code_challenge"):
-                await _send(send, 400, "PKCE S256 authorization-code flow required.", "text/plain"); return True
-            rid = secrets.token_urlsafe(18)
-            with _lock:
-                p = _load("pending"); now = time.time()
-                p = {k: v for k, v in p.items() if v["t"] > now - 1800}
-                p[rid] = {"t": now, "q": q}; _save("pending", p)
-            await _send(send, 200, _page(rid, client.get("client_name")), "text/html; charset=utf-8"); return True
-        if method == "POST":
-            f = _form(await _body(receive), hdr.get("content-type", ""))
-            with _lock:
-                pend = _load("pending").get(f.get("req", ""))
+            rid = urllib.parse.parse_qs(qs).get("r", [""])[0]
+            pend = _pending(rid)
             if not pend:
-                await _send(send, 400, "This sign-in page expired. Start the connection again from Claude.", "text/plain"); return True
-            q = pend["q"]; client = _load("clients").get(q["client_id"], {})
-            key, err = None, ""
-            if f.get("action") == "key":
-                k = (f.get("api_key") or "").strip()
-                if not k.startswith(("ws_live_", "ws_test_")) or not _check_key(k):
-                    err = "That key was not recognised. Copy it again from woodstitch.com/app/api-keys."
-                else:
-                    key = k
-            else:
-                key, e = _trial((f.get("email") or "").strip(), client.get("client_name", "Claude"), ip)
-                if not key:
-                    err = f"Could not create a trial account ({e}). Try again, or use an API key."
-            if not key:
-                await _send(send, 200, _page(f.get("req", ""), client.get("client_name"), err), "text/html; charset=utf-8"); return True
-            code = secrets.token_urlsafe(32)
-            with _lock:
-                p = _load("pending"); p.pop(f.get("req", ""), None); _save("pending", p)
-                c = _load("codes"); now = time.time()
-                c = {k: v for k, v in c.items() if v["exp"] > now}
-                c[_h(code)] = {"exp": now + CODE_TTL, "key": key, "client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
-                               "challenge": q["code_challenge"]}
-                _save("codes", c)
-            sep = "&" if "?" in q["redirect_uri"] else "?"
-            loc = q["redirect_uri"] + sep + urllib.parse.urlencode({"code": code, **({"state": q["state"]} if q.get("state") else {})})
-            await _send(send, 302, b"", "text/plain", {"location": loc}); return True
+                await _send(send, 400, _msg("This sign-in expired", "Start the connection again from Claude."), HTML, SEC); return True
+            await _send(send, 200, _page(rid, _redirect_host(pend["q"]["redirect_uri"])), HTML, SEC); return True
+        f = _form(await _body(receive), hdr.get("content-type", ""))
+        rid = f.get("req", ""); pend = _pending(rid)
+        if not pend:
+            await _send(send, 400, _msg("This sign-in expired", "Start the connection again from Claude."), HTML, SEC); return True
+        k = (f.get("api_key") or "").strip()
+        if not k.startswith(("ws_live_", "ws_test_")) or not _check_key(k):
+            await _send(send, 200, _page(rid, _redirect_host(pend["q"]["redirect_uri"]), "That key wasn't recognised. Copy it again from woodstitch.com/app/api-keys."), HTML, SEC); return True
+        await _send(send, 302, b"", "text/plain", {"location": _finish(rid, key=k)}); return True
+
+    # internal: woodstitch.com/app/connect asks what is being connected, then grants or denies
+    if path == "/oauth/internal/pending" and method == "GET":
+        rid = urllib.parse.parse_qs(qs).get("r", [""])[0]
+        if not _internal_ok(hdr, rid):
+            await _send(send, 403, {"error": "forbidden"}); return True
+        pend = _pending(rid)
+        if not pend:
+            await _send(send, 404, {"error": "expired"}); return True
+        client = _load("clients").get(pend["q"]["client_id"], {})
+        uri = pend["q"]["redirect_uri"]; host = _redirect_host(uri)
+        await _send(send, 200, {"client_name": client.get("client_name", "Claude"), "redirect_host": host,
+                                "loopback": host in ("localhost", "127.0.0.1")}); return True
+    if path == "/oauth/internal/grant" and method == "POST":
+        raw = (await _body(receive)).decode()
+        if not _internal_ok(hdr, raw):
+            await _send(send, 403, {"error": "forbidden"}); return True
+        f = json.loads(raw or "{}")
+        url = _finish(f.get("r", ""), key=f.get("key"), deny=bool(f.get("deny")))
+        if not url:
+            await _send(send, 404, {"error": "expired"}); return True
+        await _send(send, 200, {"redirect": url}); return True
 
     if path == "/oauth/token" and method == "POST":
         f = _form(await _body(receive), hdr.get("content-type", ""))
@@ -246,10 +316,14 @@ async def handle(scope, receive, send) -> bool:
                 key, cid = rec["key"], rec["client_id"]
             elif gt == "refresh_token":
                 toks = _load("refresh"); r = toks.pop(_h(f.get("refresh_token", "")), None)  # rotate: one use only
+                if r and r.get("t", 0) < time.time() - REFRESH_TTL:
+                    r = None
                 if not r or (f.get("client_id") and f.get("client_id") != r["client_id"]):
                     await _send(send, 400, {"error": "invalid_grant"}); return True
                 _save("refresh", toks)
                 key, cid = r["key"], r["client_id"]
+                if not _check_key(key, lenient=True):   # key revoked (e.g. "Revoke" in woodstitch.com/app/api-keys): connection ends
+                    await _send(send, 400, {"error": "invalid_grant", "error_description": "access was revoked"}); return True
             else:
                 await _send(send, 400, {"error": "unsupported_grant_type"}); return True
             access = "wsm_" + secrets.token_urlsafe(32); refresh = "wsr_" + secrets.token_urlsafe(32)
