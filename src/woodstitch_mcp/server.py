@@ -370,14 +370,28 @@ def main() -> None:
             pass
         inner = mcp.streamable_http_app(**kw)
 
-        async def app(scope, receive, send):  # per-request key -> context var (copied into tool threads)
-            if scope.get("type") == "http":
-                tok = _REQ_KEY.set(_key_from_scope(scope))
-                try:
-                    return await inner(scope, receive, send)
-                finally:
-                    _REQ_KEY.reset(tok)
-            return await inner(scope, receive, send)
+        from . import oauth
+
+        async def app(scope, receive, send):
+            if scope.get("type") != "http":
+                return await inner(scope, receive, send)
+            if await oauth.handle(scope, receive, send):      # discovery, registration, sign-in, token
+                return
+            key = oauth.resolve_token(_key_from_scope(scope))  # wsm_ OAuth token or a raw ws_live_ key
+            if not key:
+                hdr = {k.decode().lower() for k, _ in scope.get("headers", [])}
+                body = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message":
+                       "Sign in with Woodstitch (OAuth), or send 'Authorization: Bearer ws_live_...'."}}).encode()
+                hs = [(b"content-type", b"application/json")] + [(k.encode(), v.encode()) for k, v in
+                      oauth.unauthorized_headers("invalid_token" if "authorization" in hdr else "").items()]
+                await send({"type": "http.response.start", "status": 401, "headers": hs})
+                await send({"type": "http.response.body", "body": body})
+                return
+            tok = _REQ_KEY.set(key)  # per-request key -> context var (copied into tool threads)
+            try:
+                return await inner(scope, receive, send)
+            finally:
+                _REQ_KEY.reset(tok)
 
         uvicorn.run(app, host=host, port=port, proxy_headers=True, forwarded_allow_ips="127.0.0.1", log_level="warning")
         return
