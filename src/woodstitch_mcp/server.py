@@ -234,7 +234,7 @@ def woodstitch_delete_file(file_id: str) -> dict:
     "duration_bucket?}] and include real human recordings of the same passages as the baseline. "
     "`per_participant` = {max_judgements, unique_by: [...], max_per: {...}} limits what one listener "
     "hears; for a multi-system comparison use unique_by ['passage'] and max_per {'system': N}. "
-    "ALWAYS show the returned quote total to the user before starting."))
+    "The returned quote total is the amount a start must confirm."))
 def woodstitch_create_eval(
     pairs: Optional[list[dict]] = None,
     clips: Optional[list[dict]] = None,
@@ -274,12 +274,11 @@ def woodstitch_create_eval(
 
 
 @mcp.tool(annotations=_ann(destructive=True), description=(
-    "START an evaluation. THIS SPENDS REAL MONEY and cannot be undone once listeners begin. "
-    "Only call it after the user has seen the quote total returned by woodstitch_create_eval and "
-    "explicitly agreed. Pass that total as user_confirmed_amount_usd: it is sent to the API as the "
-    "hard spending ceiling (max_total_usd), so if the current quote is higher than what the user "
-    "confirmed the API refuses with over_max and nothing starts. Billing is metered from the first "
-    "judgement; a study pauses rather than overspends if the balance runs out."))
+    "Start an evaluation. This spends account credit and cannot be undone once listeners begin. "
+    "Requires user_confirmed_amount_usd: the quote total the user approved. It is sent to the API as the "
+    "hard spending ceiling (max_total_usd); if the current quote is higher, the API refuses with over_max "
+    "and nothing starts. Billing is metered from the first judgement, and a study pauses rather than "
+    "overspends if the balance runs out."))
 def woodstitch_start_eval(
     eval_id: int,
     user_confirmed_amount_usd: float,
@@ -306,7 +305,7 @@ def woodstitch_start_eval(
 @mcp.tool(annotations=_ann(read_only=True), description=(
     "Progress and live score for an evaluation: status, judgements done/target, pairs with data, "
     "provisional metrics, dashboard_url, and max_additional_charge_if_canceled_now_usd. Cheap to poll. "
-    "Humans take minutes to days; do not sit in a tight loop. Interim numbers are provisional."))
+    "Studies with human listeners take minutes to days. Interim numbers are provisional."))
 def woodstitch_get_eval(eval_id: int) -> dict:
     return _get(f"/evals/{eval_id}")
 
@@ -316,7 +315,7 @@ def woodstitch_get_eval(eval_id: int) -> dict:
     "Preference: human_pref/b_win_rate is the share of preference for your b side with a 95% CI; "
     "0.5 = indistinguishable. Detection: human_label_rate per source with two intervals: "
     "tested_stimuli (these files) and model (generalises over voices and passages; 3-4x wider; "
-    "quote THIS one for any claim about a model). Returns not_ready while still running."))
+    "the appropriate interval for claims about a model). Returns not_ready while still running."))
 def woodstitch_get_results(eval_id: int) -> dict:
     return _get(f"/evals/{eval_id}/results")
 
@@ -344,8 +343,8 @@ def woodstitch_export(eval_id: int, format: str = "json", save_to: Optional[str]
 
 @mcp.tool(annotations=_ann(destructive=True), description=(
     "Stop an evaluation early. Charges only for work already handed to listeners; anyone mid-task "
-    "finishes and is paid. Check max_additional_charge_if_canceled_now_usd via woodstitch_get_eval "
-    "first if the user wants that number. Requires confirm=true."))
+    "finishes and is paid. The most it can add is shown as max_additional_charge_if_canceled_now_usd "
+    "in the evaluation status. Requires confirm=true."))
 def woodstitch_cancel_eval(eval_id: int, confirm: bool = False, idempotency_key: Optional[str] = None) -> dict:
     if not confirm:
         raise WoodstitchError("set confirm=true after the user has agreed to cancel")
