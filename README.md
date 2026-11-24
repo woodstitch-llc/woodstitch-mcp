@@ -16,7 +16,7 @@ human or AI, confidence 1–4). Not offered: MOS, CMOS, MUSHRA or any 1–5 scal
 
 Woodstitch runs this server at **`https://api.woodstitch.com/mcp`** (streamable HTTP, OAuth sign-in).
 
-- **Claude (web, desktop, Cowork):** Settings → Connectors → Add custom connector → paste the URL → sign in with your API key, or create a trial account ($25 credit).
+- **Claude (web, desktop, Cowork):** Settings → Connectors → Add custom connector → paste the URL → sign in with Google, an emailed link, or your API key.
 - **Claude Code:** `claude mcp add --transport http woodstitch https://api.woodstitch.com/mcp`
 - **Other clients:** any MCP client with remote HTTP support; send `Authorization: Bearer ws_live_...` if it doesn't do OAuth.
 

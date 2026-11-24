@@ -4,7 +4,7 @@ can connect with "Sign in with Woodstitch" instead of a pasted header.
 Flow (MCP authorization spec): /mcp without a token -> 401 + WWW-Authenticate pointing at
 /.well-known/oauth-protected-resource -> client reads /.well-known/oauth-authorization-server ->
 dynamic client registration (/oauth/register) -> /oauth/authorize (PKCE S256; our page: paste an API key, or
-create a trial account with the standard $25 credit) -> /oauth/token -> Bearer wsm_... on every MCP call.
+create an account) -> /oauth/token -> Bearer wsm_... on every MCP call.
 The access token maps to the user's Woodstitch API key; the key never leaves the server.
 Raw ws_live_/ws_test_ keys are still accepted as Bearer tokens (headers, scripts).
 State is small JSON files (no database): clients, codes, tokens (sha256 of the token -> key).
