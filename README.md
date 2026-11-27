@@ -8,9 +8,14 @@ An [MCP](https://modelcontextprotocol.io) server for the [Woodstitch API](https:
 paid human listeners judge your text-to-speech audio in blinded studies, and your
 agent gets a number back with a confidence interval.
 
-Two tasks, and only two: **pairwise preference** (a listener hears two clips of the
-same text and picks one, forced choice) and **human-vs-AI detection** (one clip,
-human or AI, confidence 1–4). Not offered: MOS, CMOS, MUSHRA or any 1–5 scale.
+Four templates:
+
+- **pairwise preference** (`tts_preference.v1`): a listener hears two clips of the same
+  text and picks one, forced choice. Which is better; the most sensitive of the four.
+- **CMOS** (`tts_cmos.v1`): two clips, B scored against A from −3 to +3. How much better.
+- **MOS** (`tts_mos.v1`): one clip, scored 1–5 (ITU-T P.800 ACR). An absolute naturalness
+  score per system, e.g. for a paper or benchmark table.
+- **human-vs-AI detection** (`tts_detect.v1`): one clip, human or AI, confidence 1–4.
 
 ## Hosted server (no install)
 

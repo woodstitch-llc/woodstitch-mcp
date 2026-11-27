@@ -36,8 +36,15 @@ BASE_URL = os.environ.get("WOODSTITCH_BASE_URL", "https://api.woodstitch.com/v1"
 UA = f"woodstitch-mcp/{__version__}"
 
 INSTRUCTIONS = """Woodstitch: paid human listeners judge text-to-speech audio in blinded studies.
-Two tasks only: pairwise preference (two clips, forced choice) and human-vs-AI detection
-(one clip, human or AI, confidence 1-4). Not offered: MOS, CMOS, MUSHRA or any 1-5 scale.
+Four templates, pick by the question being asked:
+- tts_preference.v1: which of two systems do listeners prefer? Two clips, forced choice. The
+  most sensitive way to tell two close systems apart; the default.
+- tts_cmos.v1: how much better is B than A? Two clips, B scored against A from -3 to +3.
+  Returns a comparative MOS per system pair.
+- tts_mos.v1: an absolute naturalness score per system (1-5, ITU-T P.800 ACR), e.g. for a
+  paper or a benchmark table. One clip per judgement.
+- tts_detect.v1: does the audio pass as a human recording? One clip, human or AI plus
+  confidence 1-4; needs real human recordings as a baseline.
 
 Flow: woodstitch_upload_files (or public URLs) -> woodstitch_create_eval (free quote;
 dry_run=true to price without storing) -> show the quote to the user -> woodstitch_start_eval
@@ -153,9 +160,10 @@ def _ann(read_only: bool = False, destructive: bool = False, idempotent: bool = 
 
 # ----------------------------------------------------------------------------- public
 @mcp.tool(annotations=_ann(read_only=True), description=(
-    "What Woodstitch measures: the two templates (tts_preference.v1: two clips, forced choice; "
-    "tts_detect.v1: one clip, human or AI + confidence), their inputs and metrics, and what is NOT "
-    "offered (MOS, CMOS, MUSHRA, any 1-5 scale). No API key needed."))
+    "What Woodstitch measures: the four templates, their inputs and metrics. tts_preference.v1 "
+    "(two clips, forced choice: which is better; most sensitive), tts_cmos.v1 (two clips, B vs A "
+    "-3..+3: how much better), tts_mos.v1 (one clip, 1-5: absolute naturalness score per system) and "
+    "tts_detect.v1 (one clip, human or AI + confidence: does it pass as human). No API key needed."))
 def woodstitch_templates() -> dict:
     return _get("/templates", auth=False)
 
@@ -225,16 +233,25 @@ def woodstitch_delete_file(file_id: str) -> dict:
 
 
 # ----------------------------------------------------------------------------- evals
+TEMPLATES = ("tts_preference.v1", "tts_cmos.v1", "tts_mos.v1", "tts_detect.v1")
+
+
 @mcp.tool(annotations=_ann(idempotent=True), description=(
     "Create and PRICE an evaluation. Charges nothing. Resolves every clip (file id or public URL), "
     "validates it, measures duration and returns a quote with per-pair prices, warnings and the "
     "compiled design. Set dry_run=true to price without storing anything (no eval_id). "
-    "Preference: pass `pairs` as [{id, a, b, system_a?, system_b?, passage?, speaker?}] where a/b are "
-    "file ids or URLs rendering the SAME text; sides are shown to listeners in random order. "
+    "template: tts_preference.v1 (default; which is better), tts_cmos.v1 (how much better, -3..+3), "
+    "tts_mos.v1 (absolute 1-5 score per system) or tts_detect.v1 (passes as human?). "
+    "Preference and CMOS: pass `pairs` as [{id, a, b, system_a, system_b, passage?, speaker?}] where a/b "
+    "are file ids or URLs rendering the SAME text (system_a/system_b are required for CMOS). "
+    "MOS: pass `clips` as [{id, audio, system, passage?, speaker?}]; give every system's rendering of "
+    "one text the same passage id. "
     "Detection: pass `clips` as [{id, audio, truth: 'human'|'ai', source, speaker, passage, "
     "duration_bucket?}] and include real human recordings of the same passages as the baseline. "
+    "`question` overrides the template's default wording. "
     "`per_participant` = {max_judgements, unique_by: [...], max_per: {...}} limits what one listener "
     "hears; for a multi-system comparison use unique_by ['passage'] and max_per {'system': N}. "
+    "`allocation` works on detection and MOS only. "
     "The returned quote total is the amount a start must confirm."))
 def woodstitch_create_eval(
     pairs: Optional[list[dict]] = None,
@@ -249,12 +266,16 @@ def woodstitch_create_eval(
     dry_run: bool = False,
     idempotency_key: Optional[str] = None,
 ) -> dict:
-    if template not in ("tts_preference.v1", "tts_detect.v1"):
-        raise WoodstitchError("template must be tts_preference.v1 or tts_detect.v1")
-    if template == "tts_preference.v1" and not pairs:
-        raise WoodstitchError("preference studies need `pairs`")
-    if template == "tts_detect.v1" and not clips:
-        raise WoodstitchError("detection studies need `clips`")
+    if template not in TEMPLATES:
+        raise WoodstitchError("template must be one of " + ", ".join(TEMPLATES))
+    if template in ("tts_preference.v1", "tts_cmos.v1") and not pairs:
+        raise WoodstitchError(f"{template} studies need `pairs`")
+    if template in ("tts_detect.v1", "tts_mos.v1") and not clips:
+        raise WoodstitchError(f"{template} studies need `clips`")
+    if template in ("tts_mos.v1", "tts_detect.v1") and ratings_per_pair is not None and ratings_per_clip is None:
+        ratings_per_clip, ratings_per_pair = ratings_per_pair, None
+    if template in ("tts_preference.v1", "tts_cmos.v1") and ratings_per_clip is not None and ratings_per_pair is None:
+        ratings_per_pair, ratings_per_clip = ratings_per_clip, None
     body: dict[str, Any] = {"template": template, "dry_run": bool(dry_run)}
     for k, v in (("pairs", pairs), ("clips", clips), ("ratings_per_pair", ratings_per_pair),
                  ("ratings_per_clip", ratings_per_clip), ("per_participant", per_participant),
@@ -314,7 +335,9 @@ def woodstitch_get_eval(eval_id: int) -> dict:
 @mcp.tool(annotations=_ann(read_only=True), description=(
     "Final numbers once the evaluation is completed (or canceled, then incomplete=true). "
     "Preference: human_pref/b_win_rate is the share of preference for your b side with a 95% CI; "
-    "0.5 = indistinguishable. Detection: human_label_rate per source with two intervals: "
+    "0.5 = indistinguishable. MOS: mean 1-5 score per system with a 95% CI (listeners and passages "
+    "resampled), score distribution and pairwise differences. CMOS: mean score of system_b vs system_a "
+    "per system pair (-3..+3, 0 = about the same) with a 95% CI and the share preferring each side. Detection: human_label_rate per source with two intervals: "
     "tested_stimuli (these files) and model (generalises over voices and passages; 3-4x wider; "
     "the appropriate interval for claims about a model). Returns not_ready while still running."))
 def woodstitch_get_results(eval_id: int) -> dict:
@@ -322,8 +345,8 @@ def woodstitch_get_results(eval_id: int) -> dict:
 
 
 @mcp.tool(annotations=_ann(read_only=True), description=(
-    "Every judgement as a row (pseudonymous rater, pair/clip id, source, speaker, passage, answer, "
-    "confidence, time spent). format 'json' returns the rows; 'csv' returns CSV text. Pass save_to "
+    "Every judgement as a row (pseudonymous rater, pair/clip id, source or systems, speaker, passage, answer, "
+    "confidence or score, time spent; MOS/CMOS rows carry a numeric score). format 'json' returns the rows; 'csv' returns CSV text. Pass save_to "
     "(a local path) to write the export to disk instead of returning it, which is better for large studies."))
 def woodstitch_export(eval_id: int, format: str = "json", save_to: Optional[str] = None) -> dict:
     if format not in ("json", "csv"):

@@ -45,6 +45,17 @@ async def main():
             await call(s, "woodstitch_account")
             pairs = [{"id": "q01", "a": PUB_A, "b": PUB_B, "passage": "q01", "system_a": "eleven_v4", "system_b": "qwen_31_flash"}]
             _, dry = await call(s, "woodstitch_create_eval", pairs=pairs, ratings_per_pair=3, name="mcp smoke (dry)", dry_run=True)
+            _, tpl = await call(s, "woodstitch_templates")
+            assert [t["id"] for t in tpl["templates"]] == ["tts_preference.v1", "tts_detect.v1", "tts_mos.v1", "tts_cmos.v1"], tpl
+            assert "not_offered" not in tpl
+            _, cd = await call(s, "woodstitch_create_eval", template="tts_cmos.v1", pairs=pairs, ratings_per_pair=3, name="mcp smoke cmos (dry)", dry_run=True)
+            assert cd["quote"]["total_usd"] == dry["quote"]["total_usd"], (cd, dry)   # CMOS priced exactly like preference
+            clips = [{"id": "m-a", "audio": PUB_A, "system": "eleven_v4", "passage": "q01"},
+                     {"id": "m-b", "audio": PUB_B, "system": "qwen_31_flash", "passage": "q01"}]
+            _, md = await call(s, "woodstitch_create_eval", template="tts_mos.v1", clips=clips, ratings_per_clip=3, name="mcp smoke mos (dry)", dry_run=True)
+            assert md.get("dry_run") is True and md["judgements"] == 6, md
+            r, _ = await call(s, "woodstitch_create_eval", template="tts_mos.v1", pairs=pairs, dry_run=True)
+            assert is_err(r), "MOS without clips must be refused locally"
             if len(sys.argv) >= 3:
                 _, up = await call(s, "woodstitch_upload_files", paths=sys.argv[1:3])
                 ids = [f["id"] for f in up["files"]]

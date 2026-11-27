@@ -2,15 +2,15 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.woodstitch/tts-human-eval",
   "title": "Woodstitch",
-  "description": "Paid human listeners judge TTS audio blind: pairwise preference or human-vs-AI detection.",
+  "description": "Paid human listeners judge TTS audio blind: preference, CMOS, MOS or human-vs-AI detection.",
   "websiteUrl": "https://woodstitch.com/docs",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "woodstitch-mcp",
-      "version": "0.2.4",
+      "version": "0.3.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

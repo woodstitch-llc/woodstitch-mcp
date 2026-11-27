@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "woodstitch-mcp"
-version = "0.2.6"
-description = "MCP server for the Woodstitch API: paid human listeners judge your text-to-speech audio in blinded pairwise preference or human-vs-AI detection studies."
+version = "0.3.0"
+description = "MCP server for the Woodstitch API: paid human listeners judge your text-to-speech audio in blinded studies: pairwise preference, CMOS, MOS or human-vs-AI detection."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
