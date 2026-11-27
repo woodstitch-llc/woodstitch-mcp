@@ -8,6 +8,11 @@ create an account) -> /oauth/token -> Bearer wsm_... on every MCP call.
 The access token maps to the user's Woodstitch API key; the key never leaves the server.
 Raw ws_live_/ws_test_ keys are still accepted as Bearer tokens (headers, scripts).
 State is small JSON files (no database): clients, codes, tokens (sha256 of the token -> key).
+
+OpenAI (ChatGPT / Codex plugins), 27 Nov 2026: RFC 9207 `iss` on every authorization response; OpenID
+scopes `openid` + `email` with a UserInfo endpoint and an RS256 ID token (subject = Woodstitch account,
+email from the account, verified because sign-in is Google or an emailed link); the plugin portal's
+domain challenge at /.well-known/openai-apps-challenge (token in a file).
 """
 import base64, hashlib, html, json, os, secrets, time, threading, urllib.parse
 from pathlib import Path
@@ -21,6 +26,8 @@ REFRESH_TTL = 180 * 86400    # a refresh token unused for 180 days dies
 CODE_TTL = 600
 SITE = os.environ.get("WOODSTITCH_SITE", "https://woodstitch.com")
 PEPPER_FILE = os.environ.get("WOODSTITCH_PEPPER_FILE", "/home/ubuntu/woodstitch/pepper.php")
+SCOPES = ["openid", "email", "woodstitch"]
+CHALLENGE_FILE = Path(os.environ.get("WOODSTITCH_OPENAI_CHALLENGE", str(STATE / "openai_apps_challenge.txt")))
 _lock = threading.Lock()
 
 
@@ -85,6 +92,75 @@ def resolve_token(token: str) -> str:
     return ""
 
 
+# ------------------------------------------------------------------ OpenID
+def _signing_key():
+    """RS256 key for ID tokens, created once (state/oidc_key.pem, 0600). Never leaves the server."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    f = STATE / "oidc_key.pem"
+    with _lock:
+        if not f.exists():
+            STATE.mkdir(parents=True, exist_ok=True)
+            k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            tmp = f.with_suffix(".tmp")
+            tmp.write_bytes(k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            os.chmod(tmp, 0o600); os.replace(tmp, f)
+        return serialization.load_pem_private_key(f.read_bytes(), password=None)
+
+
+def _kid(pub) -> str:
+    from cryptography.hazmat.primitives import serialization
+    der = pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(der).hexdigest()[:16]
+
+
+def jwks():
+    import jwt
+    pub = _signing_key().public_key()
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(pub))
+    jwk.update({"kid": _kid(pub), "use": "sig", "alg": "RS256"})
+    return {"keys": [jwk]}
+
+
+def _account(key: str):
+    try:
+        r = httpx.get(f"{API}/account", headers={"Authorization": f"Bearer {key}", "User-Agent": "woodstitch-mcp-oauth"}, timeout=8)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _claims(key: str, scope: str):
+    a = _account(key)
+    if not a or not a.get("account_id"):
+        return None
+    c = {"sub": a["account_id"]}
+    if "email" in scope.split() and a.get("email"):
+        c.update({"email": a["email"], "email_verified": True})
+    return c
+
+
+def _id_token(key: str, client_id: str, scope: str, nonce: str = ""):
+    import jwt
+    c = _claims(key, scope)
+    if not c:
+        return None
+    now = int(time.time())
+    c.update({"iss": ISSUER, "aud": client_id, "iat": now, "exp": now + ACCESS_TTL})
+    if nonce:
+        c["nonce"] = nonce
+    k = _signing_key()
+    return jwt.encode(c, k, algorithm="RS256", headers={"kid": _kid(k.public_key())})
+
+
+def _grant_scope(requested: str) -> str:
+    """Granted scope: what was asked for, limited to ours; nothing asked = the base scope (older clients)."""
+    got = [x for x in (requested or "").split() if x in SCOPES]
+    if "woodstitch" not in got:
+        got.append("woodstitch")
+    return " ".join(sorted(set(got), key=SCOPES.index))
+
+
 # ------------------------------------------------------------------ helpers
 async def _body(receive):
     data = b""
@@ -125,6 +201,7 @@ def unauthorized_headers(error: str = ""):
 # ------------------------------------------------------------------ metadata
 def protected_resource():
     return {"resource": f"{ISSUER}/mcp", "authorization_servers": [ISSUER], "bearer_methods_supported": ["header"],
+            "scopes_supported": SCOPES,
             "resource_name": "Woodstitch human listening tests", "resource_documentation": "https://woodstitch.com/docs"}
 
 
@@ -133,7 +210,11 @@ def as_metadata():
             "registration_endpoint": f"{ISSUER}/oauth/register", "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"], "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
-            "scopes_supported": ["woodstitch"], "service_documentation": "https://woodstitch.com/docs"}
+            "scopes_supported": SCOPES, "service_documentation": "https://woodstitch.com/docs",
+            "authorization_response_iss_parameter_supported": True,
+            "userinfo_endpoint": f"{ISSUER}/oauth/userinfo", "jwks_uri": f"{ISSUER}/oauth/jwks",
+            "subject_types_supported": ["public"], "id_token_signing_alg_values_supported": ["RS256"],
+            "claims_supported": ["sub", "email", "email_verified", "iss", "aud", "iat", "exp", "nonce"]}
 
 
 # ------------------------------------------------------------------ pages
@@ -210,11 +291,12 @@ def _finish(rid, key=None, deny=False):
             c = _load("codes"); now = time.time()
             c = {k: v for k, v in c.items() if v["exp"] > now}
             c[_h(code)] = {"exp": now + CODE_TTL, "key": key, "client_id": q["client_id"], "redirect_uri": q["redirect_uri"],
-                           "challenge": q["code_challenge"]}
+                           "challenge": q["code_challenge"], "scope": _grant_scope(q.get("scope", "")), "nonce": q.get("nonce", "")}
             _save("codes", c)
             params["code"] = code
         if q.get("state"):
             params["state"] = q["state"]
+        params["iss"] = ISSUER            # RFC 9207: on success AND error responses
     sep = "&" if "?" in q["redirect_uri"] else "?"
     return q["redirect_uri"] + sep + urllib.parse.urlencode(params)
 
@@ -230,8 +312,27 @@ async def handle(scope, receive, send) -> bool:
         await _send(send, 200, protected_resource()); return True
     if path.startswith("/.well-known/oauth-authorization-server") or path.startswith("/.well-known/openid-configuration"):
         await _send(send, 200, as_metadata()); return True
+    if path == "/.well-known/openai-apps-challenge" and method == "GET":
+        try:
+            tok = CHALLENGE_FILE.read_text().strip()
+        except Exception:
+            tok = ""
+        await _send(send, 200 if tok else 404, tok, "text/plain; charset=utf-8"); return True
+    if path == "/oauth/jwks" and method == "GET":
+        await _send(send, 200, jwks()); return True
     hdr = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
     qs = scope.get("query_string", b"").decode()
+
+    if path == "/oauth/userinfo" and method in ("GET", "POST"):
+        auth = hdr.get("authorization", "")
+        tok = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        rec = _load("tokens").get(_h(tok)) if tok.startswith("wsm_") else None
+        if not rec or rec.get("exp", 0) < time.time():
+            await _send(send, 401, {"error": "invalid_token"}, headers={"www-authenticate": 'Bearer error="invalid_token"'}); return True
+        c = _claims(rec["key"], rec.get("scope", "woodstitch"))
+        if not c:
+            await _send(send, 401, {"error": "invalid_token"}, headers={"www-authenticate": 'Bearer error="invalid_token"'}); return True
+        await _send(send, 200, c); return True
     HTML = "text/html; charset=utf-8"
     SEC = {"x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'"}
 
@@ -314,6 +415,7 @@ async def handle(scope, receive, send) -> bool:
                 if not ver or chal != rec["challenge"]:
                     await _send(send, 400, {"error": "invalid_grant", "error_description": "PKCE check failed"}); return True
                 key, cid = rec["key"], rec["client_id"]
+                scope_, nonce = rec.get("scope", "woodstitch"), rec.get("nonce", "")
             elif gt == "refresh_token":
                 toks = _load("refresh"); r = toks.pop(_h(f.get("refresh_token", "")), None)  # rotate: one use only
                 if r and r.get("t", 0) < time.time() - REFRESH_TTL:
@@ -322,6 +424,7 @@ async def handle(scope, receive, send) -> bool:
                     await _send(send, 400, {"error": "invalid_grant"}); return True
                 _save("refresh", toks)
                 key, cid = r["key"], r["client_id"]
+                scope_, nonce = r.get("scope", "woodstitch"), ""
                 if not _check_key(key, lenient=True):   # key revoked (e.g. "Revoke" in woodstitch.com/app/api-keys): connection ends
                     await _send(send, 400, {"error": "invalid_grant", "error_description": "access was revoked"}); return True
             else:
@@ -329,8 +432,13 @@ async def handle(scope, receive, send) -> bool:
             access = "wsm_" + secrets.token_urlsafe(32); refresh = "wsr_" + secrets.token_urlsafe(32)
             t = _load("tokens"); now = time.time()
             t = {k: v for k, v in t.items() if v["exp"] > now}
-            t[_h(access)] = {"key": key, "client_id": cid, "exp": now + ACCESS_TTL}; _save("tokens", t)
-            r = _load("refresh"); r[_h(refresh)] = {"key": key, "client_id": cid, "t": now}; _save("refresh", r)
-        await _send(send, 200, {"access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL, "refresh_token": refresh, "scope": "woodstitch"})
+            t[_h(access)] = {"key": key, "client_id": cid, "exp": now + ACCESS_TTL, "scope": scope_}; _save("tokens", t)
+            r = _load("refresh"); r[_h(refresh)] = {"key": key, "client_id": cid, "t": now, "scope": scope_}; _save("refresh", r)
+        out = {"access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL, "refresh_token": refresh, "scope": scope_}
+        if "openid" in scope_.split():
+            idt = _id_token(key, cid, scope_, nonce)
+            if idt:
+                out["id_token"] = idt
+        await _send(send, 200, out)
         return True
     return False
