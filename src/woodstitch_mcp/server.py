@@ -46,7 +46,8 @@ Four templates, pick by the question being asked:
 - tts_detect.v1: does the audio pass as a human recording? One clip, human or AI plus
   confidence 1-4; needs real human recordings as a baseline.
 
-Flow: woodstitch_upload_files (or public URLs) -> woodstitch_create_eval (free quote;
+Flow: audio as public URLs or uploaded file ids (local install: woodstitch_upload_files; hosted: the
+API's POST /v1/files) -> woodstitch_create_eval (free quote;
 dry_run=true to price without storing) -> show the quote to the user -> woodstitch_start_eval
 (SPENDS MONEY) -> woodstitch_get_eval to poll (humans take minutes to days) ->
 woodstitch_get_results / woodstitch_export.
