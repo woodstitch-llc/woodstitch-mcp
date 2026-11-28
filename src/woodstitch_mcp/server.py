@@ -409,6 +409,34 @@ def _apply_titles() -> None:
 _apply_titles()
 
 
+def _strip_open_objects(o):
+    """Drop `additionalProperties: true` (the JSON Schema default anyway). Google's Gemini SDK
+    (google-genai MCP adapter) expects a schema object there and crashes on the boolean."""
+    if isinstance(o, dict):
+        if o.get("additionalProperties") is True:
+            del o["additionalProperties"]
+        for v in o.values():
+            _strip_open_objects(v)
+    elif isinstance(o, list):
+        for v in o:
+            _strip_open_objects(v)
+
+
+def _clean_schemas() -> None:
+    try:
+        tools = mcp._tool_manager.list_tools()
+    except Exception:
+        return
+    for t in tools:
+        try:
+            _strip_open_objects(t.parameters)
+        except Exception:
+            pass
+
+
+_clean_schemas()
+
+
 # ----------------------------------------------------------------------------- entry
 def main() -> None:
     if "--version" in sys.argv:
